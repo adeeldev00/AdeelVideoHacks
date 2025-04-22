@@ -27,9 +27,17 @@
 #     os.makedirs(STATIC_DIR)
 
 # # Initialize Instaloader with a user agent
-# L = instaloader.Instaloader(download_videos=True, download_pictures=False, download_video_thumbnails=True)
-# L.context._session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'})
+# try:
+#     L = instaloader.Instaloader(download_videos=True, download_pictures=False, download_video_thumbnails=True)
+#     L.context._session.headers.update({
+#         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+#     })
+#     logger.debug("Instaloader initialized successfully")
+# except Exception as e:
+#     logger.error(f"Failed to initialize Instaloader: {str(e)}")
+#     L = None  # Fallback to None; handle this in routes
 
+    
 # def is_instagram_url(url):
 #     """Check if the URL is an Instagram Reel URL."""
 #     return bool(re.match(r"https?://(www\.)?instagram\.com/reel/.*", url))
@@ -345,6 +353,20 @@
 #         logger.error(f"Error in download route: {str(e)}")
 #         return f"Error: {str(e)}", 500
 
+# # Add the missing routes for About and Contact pages
+# @app.route('/about')
+# def about():
+#     return render_template('about.html')
+
+# @app.route('/contact')
+# def contact():
+#     return render_template('contact.html')
+
+
+# @app.route('/favicon.ico')
+# def favicon_ico():
+#     return send_file(os.path.join(STATIC_DIR, 'favicon.png'), mimetype='image/png')
+
 # if __name__ == '__main__':
 #     app.run(debug=True)
 
@@ -354,11 +376,11 @@ import instaloader
 import os
 from io import BytesIO
 import re
-import subprocess
 import shutil
 import time
 import logging
 import requests
+import tempfile
 
 app = Flask(__name__)
 
@@ -375,10 +397,18 @@ STATIC_DIR = "/tmp/static" if os.getenv("VERCEL") else "static"
 # Ensure static directory exists
 if not os.path.exists(STATIC_DIR):
     os.makedirs(STATIC_DIR)
+    logger.debug(f"Created STATIC_DIR: {STATIC_DIR}")
 
 # Initialize Instaloader with a user agent
-L = instaloader.Instaloader(download_videos=True, download_pictures=False, download_video_thumbnails=True)
-L.context._session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'})
+try:
+    L = instaloader.Instaloader(download_videos=True, download_pictures=False, download_video_thumbnails=True)
+    L.context._session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    })
+    logger.debug("Instaloader initialized successfully")
+except Exception as e:
+    logger.error(f"Failed to initialize Instaloader: {str(e)}")
+    L = None  # Fallback to None; handle this in routes
 
 def is_instagram_url(url):
     """Check if the URL is an Instagram Reel URL."""
@@ -397,12 +427,13 @@ def sanitize_filename(filename):
 def download_thumbnail(url, output_path):
     """Download the thumbnail from a URL to the specified path."""
     try:
-        response = requests.get(url, stream=True, headers={'User-Agent': 'Mozilla/5.0'})
+        response = requests.get(url, stream=True, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
         if response.status_code == 200:
             with open(output_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     if chunk:
                         f.write(chunk)
+            logger.debug(f"Successfully downloaded thumbnail to: {output_path}")
             return True
         else:
             logger.warning(f"Failed to download thumbnail: {url}, status code: {response.status_code}")
@@ -411,27 +442,14 @@ def download_thumbnail(url, output_path):
         logger.error(f"Error downloading thumbnail: {e}")
         return False
 
-def reencode_video(input_path, output_path, resolution):
-    """Re-encode video to the specified resolution using ffmpeg."""
-    width, height = resolution.split('x')
-    try:
-        subprocess.run([
-            'ffmpeg',
-            '-i', input_path,
-            '-vf', f'scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2',
-            '-c:v', 'libx264',
-            '-b:v', '1M',
-            '-c:a', 'aac',
-            output_path
-        ], check=True)
-        return True
-    except Exception as e:
-        logger.error(f"Error re-encoding video: {e}")
-        return False
-
 @app.route('/')
 def index():
-    return render_template('index.html')
+    try:
+        logger.debug("Rendering index.html")
+        return render_template('index.html')
+    except Exception as e:
+        logger.error(f"Error rendering index.html: {str(e)}")
+        return "Error: Unable to load the homepage.", 500
 
 @app.route('/fetch', methods=['POST'])
 def fetch():
@@ -439,83 +457,75 @@ def fetch():
     url = request.form['url']
     try:
         if is_instagram_url(url):
+            if L is None:
+                logger.error("Instaloader is not initialized")
+                return "Error: Instagram Reel downloading is currently unavailable.", 500
+
             # Handle Instagram Reel
             shortcode = url.split('/reel/')[1].split('/')[0]
             logger.debug(f"Fetching Instagram Reel with shortcode: {shortcode}")
             post = instaloader.Post.from_shortcode(L.context, shortcode)
-            
-            # Clean up any existing temp_reel directory
-            if os.path.exists("temp_reel"):
-                shutil.rmtree("temp_reel", ignore_errors=True)
-            
-            # Download the Reel (including video)
-            L.download_post(post, target="temp_reel")
-            
-            # Find the downloaded video file
-            video_path = None
-            for file in os.listdir("temp_reel"):
-                if file.endswith(".mp4"):
-                    video_path = os.path.join("temp_reel", file)
-            if not video_path:
-                logger.error("No MP4 file found in temp_reel directory")
-                return "Error: Could not find downloaded Reel video.", 500
 
-            logger.debug(f"Found video file: {video_path}")
+            # Use a temporary directory in /tmp for Vercel compatibility
+            with tempfile.TemporaryDirectory(dir='/tmp') as temp_dir:
+                # Download the Reel (including video)
+                L.download_post(post, target=temp_dir)
 
-            # Try to fetch the thumbnail manually
-            thumbnail_path = None
-            thumbnail_url = None
-            if post.is_video:
-                # Instagram Reels typically use the display_url or a thumbnail URL in the post's metadata
-                thumbnail_url = post._asdict().get('thumbnail_url', post.url)
-                logger.debug(f"Thumbnail URL from metadata: {thumbnail_url}")
-                # Download the thumbnail manually
-                thumbnail_filename = f"{shortcode}_thumbnail.jpg"
-                thumbnail_path = os.path.join(STATIC_DIR, thumbnail_filename)
-                if download_thumbnail(thumbnail_url, thumbnail_path):
-                    logger.debug(f"Successfully downloaded thumbnail to: {thumbnail_path}")
+                # Find the downloaded video file
+                video_path = None
+                for file in os.listdir(temp_dir):
+                    if file.endswith(".mp4"):
+                        video_path = os.path.join(temp_dir, file)
+                if not video_path:
+                    logger.error("No MP4 file found in temp directory")
+                    return "Error: Could not find downloaded Reel video.", 500
+
+                logger.debug(f"Found video file: {video_path}")
+
+                # Try to fetch the thumbnail manually
+                thumbnail_path = None
+                thumbnail_url = None
+                if post.is_video:
+                    thumbnail_url = post._asdict().get('thumbnail_url', post.url)
+                    logger.debug(f"Thumbnail URL from metadata: {thumbnail_url}")
+                    # Download the thumbnail manually
+                    thumbnail_filename = f"{shortcode}_thumbnail.jpg"
+                    thumbnail_path = os.path.join(STATIC_DIR, thumbnail_filename)
+                    if not download_thumbnail(thumbnail_url, thumbnail_path):
+                        logger.warning("Failed to download thumbnail manually")
+                        thumbnail_path = ''
                 else:
-                    logger.warning("Failed to download thumbnail manually")
+                    logger.warning("Post is not a video, no thumbnail available")
                     thumbnail_path = ''
-            else:
-                logger.warning("Post is not a video, no thumbnail available")
-                thumbnail_path = ''
 
-            # Define available resolutions (for local testing with ffmpeg)
-            resolutions = ['360x640', '480x854', '720x1280']
-            video_formats = [
-                {
-                    'format_id': f'instagram_reel_{res}',
-                    'resolution': res.split('x')[1] + 'p',
-                    'ext': 'mp4',
-                    'fps': 'Unknown'
-                } for res in resolutions
-            ]
-            # Add original resolution option
-            video_formats.append({
-                'format_id': 'instagram_reel_original',
-                'resolution': 'Original',
-                'ext': 'mp4',
-                'fps': 'Unknown'
-            })
-            audio_formats = []
+                # Only offer original resolution (no ffmpeg on Vercel)
+                video_formats = [
+                    {
+                        'format_id': 'instagram_reel_original',
+                        'resolution': 'Original',
+                        'ext': 'mp4',
+                        'fps': 'Unknown'
+                    }
+                ]
+                audio_formats = []
 
-            # Use caption or username as title if caption is not available
-            title = post.caption if post.caption else f"Reel by {post.owner_username}"
-            if not title:
-                title = "Instagram Reel"
-            sanitized_title = sanitize_filename(title)
+                # Use caption or username as title if caption is not available
+                title = post.caption if post.caption else f"Reel by {post.owner_username}"
+                if not title:
+                    title = "Instagram Reel"
+                sanitized_title = sanitize_filename(title)
 
-            video_info = {
-                'title': title,
-                'sanitized_title': sanitized_title,
-                'thumbnail': os.path.basename(thumbnail_path) if thumbnail_path else '',
-                'thumbnail_type': 'local' if thumbnail_path else 'none',  # Local file for Instagram
-                'video_formats': video_formats,
-                'audio_formats': audio_formats,
-                'url': url,
-                'video_path': video_path
-            }
+                video_info = {
+                    'title': title,
+                    'sanitized_title': sanitized_title,
+                    'thumbnail': os.path.basename(thumbnail_path) if thumbnail_path else '',
+                    'thumbnail_type': 'local' if thumbnail_path else 'none',
+                    'video_formats': video_formats,
+                    'audio_formats': audio_formats,
+                    'url': url,
+                    'video_path': video_path
+                }
+
         else:
             # Handle YouTube or Facebook Reel
             ydl_opts = {
@@ -561,7 +571,6 @@ def fetch():
                 thumbnail_type = 'none'
                 if thumbnail_url:
                     try:
-                        # Use a GET request instead of HEAD to better handle redirects
                         response = requests.get(thumbnail_url, stream=True, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
                         if response.status_code == 200:
                             thumbnail_type = 'remote'
@@ -577,7 +586,7 @@ def fetch():
                     'title': title,
                     'sanitized_title': sanitized_title,
                     'thumbnail': thumbnail_url,
-                    'thumbnail_type': thumbnail_type,  # Remote URL for YouTube/Facebook
+                    'thumbnail_type': thumbnail_type,
                     'video_formats': video_formats,
                     'audio_formats': audio_formats,
                     'url': url
@@ -604,62 +613,26 @@ def download(format_id):
             # Wait briefly to ensure file is fully written
             time.sleep(1)
 
-            if format_id == 'instagram_reel_original':
-                # Download original resolution
-                buffer = BytesIO()
-                with open(video_path, 'rb') as f:
-                    buffer.write(f.read())
-                buffer.seek(0)
+            # Only support original resolution on Vercel (no ffmpeg)
+            buffer = BytesIO()
+            with open(video_path, 'rb') as f:
+                buffer.write(f.read())
+            buffer.seek(0)
 
-                # Clean up
-                logger.debug("Cleaning up temp_reel directory")
-                shutil.rmtree("temp_reel", ignore_errors=True)
+            # Clean up static directory (remove thumbnail)
+            if video_info.get('thumbnail') and video_info.get('thumbnail_type') == 'local':
+                thumbnail_static_path = os.path.join(STATIC_DIR, video_info['thumbnail'])
+                if os.path.exists(thumbnail_static_path):
+                    os.remove(thumbnail_static_path)
+                    logger.debug(f"Removed thumbnail from static directory: {thumbnail_static_path}")
 
-                # Clean up static directory (remove thumbnail)
-                if video_info.get('thumbnail') and video_info.get('thumbnail_type') == 'local':
-                    thumbnail_static_path = os.path.join(STATIC_DIR, video_info['thumbnail'])
-                    if os.path.exists(thumbnail_static_path):
-                        os.remove(thumbnail_static_path)
-                        logger.debug(f"Removed thumbnail from static directory: {thumbnail_static_path}")
-
-                logger.debug("Sending file to client")
-                return send_file(
-                    buffer,
-                    as_attachment=True,
-                    download_name=f"{video_info['sanitized_title']}.mp4",
-                    mimetype="video/mp4"
-                )
-            else:
-                # Re-encode to desired resolution (requires ffmpeg)
-                resolution = format_id.split('_')[-1]
-                output_path = "temp_reel/output.mp4"
-                if reencode_video(video_path, output_path, resolution):
-                    buffer = BytesIO()
-                    with open(output_path, 'rb') as f:
-                        buffer.write(f.read())
-                    buffer.seek(0)
-
-                    # Clean up
-                    logger.debug("Cleaning up temp_reel directory after re-encoding")
-                    shutil.rmtree("temp_reel", ignore_errors=True)
-
-                    # Clean up static directory (remove thumbnail)
-                    if video_info.get('thumbnail') and video_info.get('thumbnail_type') == 'local':
-                        thumbnail_static_path = os.path.join(STATIC_DIR, video_info['thumbnail'])
-                        if os.path.exists(thumbnail_static_path):
-                            os.remove(thumbnail_static_path)
-                            logger.debug(f"Removed thumbnail from static directory: {thumbnail_static_path}")
-
-                    logger.debug("Sending re-encoded file to client")
-                    return send_file(
-                        buffer,
-                        as_attachment=True,
-                        download_name=f"{video_info['sanitized_title']}_{resolution.split('x')[1]}p.mp4",
-                        mimetype="video/mp4"
-                    )
-                else:
-                    logger.error("Failed to re-encode video")
-                    return "Error: Failed to re-encode video. Try original resolution.", 500
+            logger.debug("Sending file to client")
+            return send_file(
+                buffer,
+                as_attachment=True,
+                download_name=f"{video_info['sanitized_title']}.mp4",
+                mimetype="video/mp4"
+            )
         else:
             # Handle YouTube or Facebook Reel download
             ydl_opts = {
@@ -672,7 +645,7 @@ def download(format_id):
 
             # Stream the video directly into memory
             logger.debug(f"Fetching video stream from: {video_url}")
-            response = requests.get(video_url, stream=True)
+            response = requests.get(video_url, stream=True, timeout=5)
             if response.status_code != 200:
                 logger.error(f"Failed to fetch video stream: {response.status_code}")
                 return "Error: Could not fetch video stream.", 500
@@ -695,19 +668,36 @@ def download(format_id):
         logger.error(f"Error in download route: {str(e)}")
         return f"Error: {str(e)}", 500
 
-# Add the missing routes for About and Contact pages
 @app.route('/about')
 def about():
-    return render_template('about.html')
+    try:
+        logger.debug("Rendering about.html")
+        return render_template('about.html')
+    except Exception as e:
+        logger.error(f"Error rendering about.html: {str(e)}")
+        return "Error: Unable to load the About page.", 500
 
 @app.route('/contact')
 def contact():
-    return render_template('contact.html')
-
+    try:
+        logger.debug("Rendering contact.html")
+        return render_template('contact.html')
+    except Exception as e:
+        logger.error(f"Error rendering contact.html: {str(e)}")
+        return "Error: Unable to load the Contact page.", 500
 
 @app.route('/favicon.ico')
 def favicon_ico():
-    return send_file(os.path.join(STATIC_DIR, 'favicon.png'), mimetype='image/png')
+    try:
+        favicon_path = os.path.join(STATIC_DIR, 'favicon.png')
+        if not os.path.exists(favicon_path):
+            # If favicon.png isn't in /tmp/static, try the static/ directory
+            favicon_path = os.path.join("static", 'favicon.png')
+        logger.debug(f"Serving favicon from: {favicon_path}")
+        return send_file(favicon_path, mimetype='image/png')
+    except Exception as e:
+        logger.error(f"Error serving favicon.ico: {str(e)}")
+        return "", 404
 
 if __name__ == '__main__':
     app.run(debug=True)
