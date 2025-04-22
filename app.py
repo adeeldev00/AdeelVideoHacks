@@ -704,5 +704,10 @@ def about():
 def contact():
     return render_template('contact.html')
 
+
+@app.route('/favicon.ico')
+def favicon_ico():
+    return send_file(os.path.join(STATIC_DIR, 'favicon.png'), mimetype='image/png')
+
 if __name__ == '__main__':
     app.run(debug=True)
